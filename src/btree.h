@@ -189,18 +189,16 @@ int sqlite3BtreeNewDb(Btree *p);
 */
 #define BTREE_HINT_RANGE 0       /* Range constraints on queries */
 
+
 /*
-** Values that may be OR'd together to form the argument to the
-** BTREE_HINT_FLAGS hint for sqlite3BtreeCursorHint():
+** 以下标志可通过按位或(OR)运算组合，作为 sqlite3BtreeCursorHint() 函数的 
+** BTREE_HINT_FLAGS 参数：
 **
-** The BTREE_BULKLOAD flag is set on index cursors when the index is going
-** to be filled with content that is already in sorted order.
+** BTREE_BULKLOAD 标志用于索引游标，表示该索引即将被填充已排序的内容。
+  tag.xujun 批量加载已排序数据到索引, 提升有序数据插入速度约 30-50%
 **
-** The BTREE_SEEK_EQ flag is set on cursors that will get OP_SeekGE or
-** OP_SeekLE opcodes for a range search, but where the range of entries
-** selected will all have the same key.  In other words, the cursor will
-** be used only for equality key searches.
-**
+** BTREE_SEEK_EQ 标志用于那些将通过 OP_SeekGE 或 OP_SeekLE 操作码进行范围搜索，
+** 但所选条目范围均具有相同键值的游标。换句话说，该游标仅用于等值键搜索。
 */
 #define BTREE_BULKLOAD 0x00000001  /* Used to full index in sorted order */
 #define BTREE_SEEK_EQ  0x00000002  /* EQ seeks only - no range seeks */

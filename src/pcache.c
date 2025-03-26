@@ -22,6 +22,8 @@
 ** on disk.  A page is "dirty" if it has been modified and needs to be
 ** persisted to disk.
 **
+干净的页：没有被修改过
+脏页：被修改过的页
 ** pDirty, pDirtyTail, pSynced:
 **   All dirty pages are linked into the doubly linked list using
 **   PgHdr.pDirtyNext and pDirtyPrev. The list is maintained in LRU order
@@ -29,6 +31,8 @@
 **   PCache.pDirty points to the first (newest) element in the list and
 **   pDirtyTail to the last (oldest).
 **
+pDirty, pDirtyTail 指向LRU链表的头和尾
+
 **   The PCache.pSynced variable is used to optimize searching for a dirty
 **   page to eject from the cache mid-transaction. It is better to eject
 **   a page that does not require a journal sync than one that does. 
@@ -37,6 +41,8 @@
 **   clear PGHDR_NEED_SYNC flag or to a page that is older than this one
 **   (so that the right page to eject can be found by following pDirtyPrev
 **   pointers).
+PCache.pSynced 用来在事务过程中优化查找脏页，找到一个不需要同步journal日志比需要日志同步的页面更好。
+因此，pSynced 总是指向脏页列表中最旧的没有PGHDR_NEED_SYNC标志的页或者更旧的页
 */
 struct PCache {
   PgHdr *pDirty, *pDirtyTail;         /* List of dirty pages in LRU order */
@@ -179,6 +185,11 @@ int sqlite3PcachePageSanity(PgHdr *pPg){
 ** remove pPage from the dirty list.  The 0x02 means add pPage back to
 ** the dirty list.  Doing both moves pPage to the front of the dirty list.
 */
+/*
+** addRemove & PCACHE_DIRTYLIST_REMOVE 从脏页链表上移除缓存页。
+** addRemove & PCACHE_DIRTYLIST_ADD 将缓存页添加到脏页链表上。
+** 添加、移除都是从链表头上操作
+*/
 static void pcacheManageDirtyList(PgHdr *pPage, u8 addRemove){
   PCache *p = pPage->pCache;
 
@@ -207,6 +218,7 @@ static void pcacheManageDirtyList(PgHdr *pPage, u8 addRemove){
       ** This is an optimization that allows sqlite3PcacheFetch() to skip
       ** searching for a dirty page to eject from the cache when it might
       ** otherwise have to.  */
+     // 没有脏页时，eCreate 设置为2
       assert( pPage==p->pDirty );
       p->pDirty = pPage->pDirtyNext;
       assert( p->bPurgeable || p->eCreate==2 );
@@ -249,6 +261,7 @@ static void pcacheManageDirtyList(PgHdr *pPage, u8 addRemove){
 ** Wrapper around the pluggable caches xUnpin method. If the cache is
 ** being used for an in-memory database, this function is a no-op.
 */
+
 static void pcacheUnpin(PgHdr *p){
   if( p->pCache->bPurgeable ){
     pcacheTrace(("%p.UNPIN %d\n", p->pCache, p->pgno));
@@ -311,11 +324,17 @@ int sqlite3PcacheSize(void){ return sizeof(PCache); }
 ** The caller discovers how much space needs to be allocated by 
 ** calling sqlite3PcacheSize().
 **
+创建PCache对象。
+PCache内存在这之前已经申请了，通过p指针传递进来。
+调用者通过调用sqlite3PcacheSize获取PCache对象内存大小。
+
 ** szExtra is some extra space allocated for each page.  The first
 ** 8 bytes of the extra space will be zeroed as the page is allocated,
 ** but remaining content will be uninitialized.  Though it is opaque
 ** to this module, the extra space really ends up being the MemPage
 ** structure in the pager.
+szExtra是管理缓存页需要的额外空间。
+第一个8字节额外空间在页缓存刚申请出来的时候会被初始化为零，其他的内容没有初始化。
 */
 int sqlite3PcacheOpen(
   int szPage,                  /* Size of every page */
@@ -371,14 +390,23 @@ int sqlite3PcacheSetPageSize(PCache *pCache, int szPage){
 ** This routine returns a NULL pointer if the object was not in cache
 ** and could not be created.
 **
+尝试获取页缓存句柄。
+如果该页在缓存中已经存在或者可以创建一个新的，函数返回sqlite3_pcache_page指针。
+如果缓存中不存在且不能创建新的，返回NULL
 ** The createFlags should be 0 to check for existing pages and should
 ** be 3 (not 1, but 3) to try to create a new page.
 **
+createFlags = 0 用来检查该页缓存在PCache中存不存在。
+createFlags = 3 用来尝试创建一个新的缓存页。
+
 ** If the createFlag is 0, then NULL is always returned if the page
 ** is not already in the cache.  If createFlag is 1, then a new page
 ** is created only if that can be done without spilling dirty pages
 ** and without exceeding the cache size limit.
 **
+createFlag = 0 时，如果该页在缓存中不存在，返回NULL
+createFlag = 1 时，当不会溢出脏页个数且不会超出缓存大小限制时，创建新的。
+
 ** The caller needs to invoke sqlite3PcacheFetchFinish() to properly
 ** initialize the sqlite3_pcache_page object and convert it into a
 ** PgHdr object.  The sqlite3PcacheFetch() and sqlite3PcacheFetchFinish()
@@ -386,6 +414,9 @@ int sqlite3PcacheSetPageSize(PCache *pCache, int szPage){
 ** they can both (usually) operate without having to push values to
 ** the stack on entry and pop them back off on exit, which saves a
 ** lot of pushing and popping.
+调用者需要调用sqlite3PcacheFetchFinish()来适当地初始化sqlite3_pcache_page和转化sqlite3_pcache_page成PgHdr对象。
+因为性能原因，所以将FetchPage 操作拆分成sqlite3PcacheFetch()和sqlite3PcacheFetchFinish()。
+！！！当他们独立的时候，可以减少多次入栈出栈操作
 */
 sqlite3_pcache_page *sqlite3PcacheFetch(
   PCache *pCache,       /* Obtain the page from this cache */
@@ -427,7 +458,12 @@ sqlite3_pcache_page *sqlite3PcacheFetch(
 ** allocate the new page and will only fail to allocate a new page on
 ** an OOM error.
 **
+如果sqlite3PcacheFetch()因为没有干净的页而失败时，sqlite3PcacheFetchStress可以尝试去申请页。
+这个函数尝试调用stress回调函数将脏页写到journal日志。
+sqlite3PcacheFetchStress尝试去申请新页，且只有在OOM错误时才会失败。
+
 ** This routine should be invoked only after sqlite3PcacheFetch() fails.
+这个函数只能在sqlite3PcacheFetch()失败时才能调用
 */
 int sqlite3PcacheFetchStress(
   PCache *pCache,                 /* Obtain the page from this cache */
@@ -443,10 +479,16 @@ int sqlite3PcacheFetchStress(
     ** cleared), but if that is not possible settle for any other 
     ** unreferenced dirty page.
     **
+    查找一个可以写磁盘并且回收的脏页。
+    先找没有PGHDR_NEED_SYNC标记的页，如果没有，查找没有引用的脏页。
+
     ** If the LRU page in the dirty list that has a clear PGHDR_NEED_SYNC
     ** flag is currently referenced, then the following may leave pSynced
     ** set incorrectly (pointing to other than the LRU page with NEED_SYNC
-    ** cleared). This is Ok, as pSynced is just an optimization.  */
+    ** cleared). This is Ok, as pSynced is just an optimization.  
+    如果脏页链表中没有PGHDR_NEED_SYNC标志的页被引用，那么下面的程序会使得pSynced字段设置错误。
+    这没问题，pSynced只是一个优化。
+    */
     for(pPg=pCache->pSynced; 
         pPg && (pPg->nRef || (pPg->flags&PGHDR_NEED_SYNC)); 
         pPg=pPg->pDirtyPrev
@@ -484,6 +526,8 @@ int sqlite3PcacheFetchStress(
 ** This routine is broken out into a separate function since it
 ** requires extra stack manipulation that can be avoided in the common
 ** case.
+在fetch到的page没有初始化的特殊情况下，这个函数会进行初始化。
+这个程序
 */
 static SQLITE_NOINLINE PgHdr *pcacheFetchFinishWithInit(
   PCache *pCache,             /* Obtain the page from this cache */

@@ -1161,6 +1161,9 @@ static int walIndexAppend(Wal *pWal, u32 iFrame, u32 iPage){
     ** writing one or more dirty pages to the WAL to free up memory). 
     ** Remove the remnants of that writers uncommitted transaction from 
     ** the hash-table before writing any new entries.
+
+    如果当前帧编号在映射数组已经存在，说明前一个写事务已经被中断。移除前一个事务
+
     */
     if( sLoc.aPgno[idx-1] ){
       walCleanupHash(pWal);
@@ -1236,7 +1239,8 @@ static int walIndexRecover(Wal *pWal){
   assert( WAL_CKPT_LOCK==WAL_ALL_BUT_WRITE );
   assert( pWal->writeLock );
   iLock = WAL_ALL_BUT_WRITE + pWal->ckptLock;
-  rc = walLockExclusive(pWal, iLock, WAL_READ_LOCK(0)-iLock);
+  rc = walLockExclusive(pWal, iLock, WAL_READ_LOCK(0)-iLock); //ckptLock = 0 时 iLock = 1, n = 2 -> 加 ckpt + recovery
+                                                              // ckptLock = 1 时 iLock =2 n = 1 -> 加 recovery
   if( rc ){
     return rc;
   }
@@ -2405,6 +2409,11 @@ static int walIndexReadHdr(Wal *pWal, int *pChanged){
       ** open, and hence the content of the shared-memory is unreliable,
       ** since the shared-memory might be inconsistent with the WAL file
       ** and there is no writer on hand to fix it. */
+     /*
+      SQLITE_READONLY_CANTINIT 意味着共享内存已经open，但是不可写，这个线程无法确认其他可写线程是否已经打开共享内存，因此共享内存内容是不可靠的，
+      因为共享内存可能和wal文件不一致，也没有写者去解决它
+
+     */
       assert( page0==0 );
       assert( pWal->writeLock==0 );
       assert( pWal->readOnly & WAL_SHM_RDONLY );
@@ -2662,10 +2671,12 @@ static int walBeginShmUnreliable(Wal *pWal, int *pChanged){
 ** other transient condition.  When that happens, it returns WAL_RETRY to
 ** indicate to the caller that it is safe to retry immediately.
 **
+尝试开启读事务，有可能因为竞争或者其他临时情况失败。失败时返回WAL_RETRY告诉调用者需要重试
 ** On success return SQLITE_OK.  On a permanent failure (such an
 ** I/O error or an SQLITE_BUSY because another process is running
 ** recovery) return a positive error code.
 **
+成功返回0，失败（有可能因为IO错误，或者其他进程正在recovery）返回一个错误码
 ** The useWal parameter is true to force the use of the WAL and disable
 ** the case where the WAL is bypassed because it has been completely
 ** checkpointed.  If useWal==0 then this routine calls walIndexReadHdr() 
@@ -2675,6 +2686,8 @@ static int walBeginShmUnreliable(Wal *pWal, int *pChanged){
 ** flushed.)  When useWal==1, the wal-index header is assumed to already
 ** be loaded and the pChanged parameter is unused.
 **
+useWal参数为true时，强制使用WAL，禁止绕过WAL，wal-index头被认定已经被加载
+useWal为false时，调用walIndexReadHdr将wal-index头拷贝到pWal->hdr
 ** The caller must set the cnt parameter to the number of prior calls to
 ** this routine during the current read attempt that returned WAL_RETRY.
 ** This routine will start taking more aggressive measures to clear the
@@ -2877,6 +2890,8 @@ static int walTryBeginRead(Wal *pWal, int *pChanged, int useWal, int cnt){
   ** between the time it was read and when the shared-lock was obtained
   ** on WAL_READ_LOCK(mxI) was obtained to account for the possibility
   ** that the log file may have been wrapped by a writer, or that frames
+需要去检查wal-index头，这个wal-index头不能在拿共享锁和读事务之间被改变，这个共享锁有可能被获取去用来写事务修改wal文件
+
   ** that occur later in the log than pWal->hdr.mxFrame may have been
   ** copied into the database by a checkpointer. If either of these things
   ** happened, then reading the database with the current value of
@@ -3160,6 +3175,7 @@ int sqlite3WalFindFrame(
   ** pgno. Each iteration of the following for() loop searches one
   ** hash table (each hash table indexes up to HASHTABLE_NPAGE frames).
   **
+  每次迭代搜索一个哈希表
   ** This code might run concurrently to the code in walIndexAppend()
   ** that adds entries to the wal-index (and possibly to this hash 
   ** table). This means the value just read from the hash 
@@ -3170,6 +3186,8 @@ int sqlite3WalFindFrame(
   ** that any slots written before the current read transaction was
   ** opened remain unmodified.
   **
+  这段代码可能和walIndexAppend函数并发，意味着读出来的值可能是刚写或者刚读完才被写入
+  值可能被在读事务开启后被不正确写入，这些slot包含了一些脏数据。尽管如此，我们仍然假设这些哈希slot是在当前读事务开启时没被修改
   ** For the reasons above, the if(...) condition featured in the inner
   ** loop of the following block is more stringent that would be required 
   ** if we had exclusive access to the hash-table:

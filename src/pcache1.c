@@ -33,12 +33,20 @@
 ** The superclass sqlite3_pcache_page.pBuf points to the start of the
 ** database page content and sqlite3_pcache_page.pExtra points to PgHdr.
 **
+页缓存在最前面，所以即使页缓存溢出，危害也不大;MemPage 是B树模块需要包含的额外信息（比如说页号和页是被使用的）;PgHdr 是PCache需要的额外信息，PgHdr1是本模块需要的。
+PgHdr1 是 sqlite3_pcache_page的父类。
+PgHdr1 包含了通过页号去查找页的信息。
+sqlite3_pcache_page.pBuf指向页缓存，sqlite3_pcache_page.pExtra指向PgHdr
+
 ** The size of the extension (MemPage+PgHdr+PgHdr1) can be determined at
 ** runtime using sqlite3_config(SQLITE_CONFIG_PCACHE_HDRSZ, &size).  The
 ** sizes of the extensions sum to 272 bytes on x64 for 3.8.10, but this
 ** size can vary according to architecture, compile-time options, and
 ** SQLite library version number.
 **
+MemPage+PgHdr+PgHdr1 额外信息的大小可以在运行时通过sqlite3_config(SQLITE_CONFIG_PCACHE_HDRSZ, &size)来指定。
+这个大小在x64 for 3.8.10 系统上总共272字节，这个大小可以根据系统架构，编译选项和Sqlite库版本号变化。
+
 ** Historical note:  It used to be that if the SQLITE_PCACHE_SEPARATE_HEADER
 ** was defined, then the page content would be held in a separate memory
 ** allocation from the PgHdr1.  This was intended to avoid clownshoe memory
@@ -47,12 +55,23 @@
 ** area.  Therefore SQLITE_PCACHE_SEPARATE_HEADER was discontinued to avoid
 ** any possibility of a memory error.
 **
+历史原因：在过去，如果SQLITE_PCACHE_SEPARATE_HEADER宏被定义，那么页缓存是一块由PgHdr1单独申请的内存。
+这样可以避免小丑般的内存分配。
+然而，B树模块在页缓存后面需要一个的16字节的超限区。
+
 ** This module tracks pointers to PgHdr1 objects.  Only pcache.c communicates
 ** with this module.  Information is passed back and forth as PgHdr1 pointers.
 **
+这个模块跟踪PgHdr1对象的指针。
+只有PCache模块和PCache1模块有互动。
+信息通过PgHdr1指针来回传递。
+
 ** The pcache.c and pager.c modules deal pointers to PgHdr objects.
 ** The btree.c module deals with pointers to MemPage objects.
 **
+PCache 和 Pager模块处理PgHdr指针。
+B树模块处理MemPage指针。
+
 ** SOURCE OF PAGE CACHE MEMORY:
 **
 ** Memory for a page might come from any of three sources:
@@ -62,6 +81,11 @@
 **         SQLITE_CONFIG_PAGECACHE.
 **    (3)  PCache-local bulk allocation.
 **
+页缓存的来源由下面三种方式：
+  （1）malloc产生 --- sqlite3Malloc()
+  （2）使用SQLITE_CONFIG_PAGECACHE参数的sqlite3_config()产生的全局页缓存
+  （3）局部PCache bulk分配
+
 ** The third case is a chunk of heap memory (defaulting to 100 pages worth)
 ** that is allocated when the page cache is created.  The size of the local
 ** bulk allocation can be adjusted using 
@@ -73,13 +97,22 @@
 ** Or if N is negative, then -1024*N bytes of memory are allocated and used
 ** for as many pages as can be accomodated.
 **
+第三个案例是一个在页缓存管理结构被创建时就申请的heap内存块。
+这个局部bulk内存的大小可以使用sqlite3_config(SQLITE_CONFIG_PAGECACHE, (void*)0, 0, N)来调节。
+如果 N 是正数，将会申请N个页大小的内存。
+如果 N 是负数，申请 - 1024 * N个页大小的内存。
+
 ** Only one of (2) or (3) can be used.  Once the memory available to (2) or
 ** (3) is exhausted, subsequent allocations fail over to the general-purpose
 ** memory allocator (1).
 **
+（2）和（3）的方式只可以使用一种，一旦（2）或 （3）的内存被耗尽，后面将使用第一种方式的内存分配器。
+
 ** Earlier versions of SQLite used only methods (1) and (2).  But experiments
 ** show that method (3) with N==100 provides about a 5% performance boost for
 ** common workloads.
+早期的版本只有 （1）和 （2），但是实验显示方法3（使用 100个页大小）可以提升5%的性能
+
 */
 #include "sqliteInt.h"
 
@@ -93,12 +126,18 @@ typedef struct PGroup PGroup;
 ** structure. A buffer of PgHdr1.pCache->szPage bytes is allocated
 ** directly before this structure and is used to cache the page content.
 **
+每个缓存入口代表着PgHdr1结构体的实例。
+在PgHdr1的内存前面是一块PgHdr1.pCache->szPage大小的内存，这块内存用来缓存页内容。
 ** When reading a corrupt database file, it is possible that SQLite might
 ** read a few bytes (no more than 16 bytes) past the end of the page buffer.
 ** It will only read past the end of the page buffer, never write.  This
 ** object is positioned immediately after the page buffer to serve as an
 ** overrun area, so that overreads are harmless.
 **
+当读取了一个损坏的db文件时，Sqlite有可能会产生越界读（越界读取不超过16个字节的数据）。
+只会越界读而不会越界写。
+PgHdr1内存放在页内容缓存后面作为越界区，所以越界读损害较小。
+
 ** Variables isBulkLocal and isAnchor were once type "u8". That works,
 ** but causes a 2-byte gap in the structure for most architectures (since 
 ** pointers must be either 4 or 8-byte aligned). As this structure is located
@@ -109,10 +148,18 @@ typedef struct PGroup PGroup;
 ** ensures there is no such gap, and therefore no bytes of uninitialized
 ** memory in the structure.
 **
+isBulkLocal 和 isAnchor 曾经是u8类型，这会导致在大多数架构的系统中产生2字节的缝隙。
+由于PgHdr1是放在页内容缓存后面，如果数据库损坏，B树层代码可能会在损坏被检出之前越界读页缓存，甚至读取结构体的部分。
+如果这个缝隙未初始化被检测出来，这将会导致valgrind工具报错。
+使用u16可以确保没有缝隙，因此这个结构体不会有未初始化的内存。
+
 ** The pLruNext and pLruPrev pointers form a double-linked circular list
 ** of all pages that are unpinned.  The PGroup.lru element (which should be
 ** the only element on the list with PgHdr1.isAnchor set to 1) forms the
 ** beginning and the end of the list.
+pLruNext 和 pLruPrev 是一个双向循环链表，所有的unpin页都在这个链表上。
+PGroup.lru字段是这个链表的头。
+只有PGroup.lru.isAnchor = 1，其他的PgHdr1.isAnchor 是0
 */
 struct PgHdr1 {
   sqlite3_pcache_page page; /* Base class. Must be first. pBuf & pExtra */
@@ -129,6 +176,8 @@ struct PgHdr1 {
 /*
 ** A page is pinned if it is not on the LRU list.  To be "pinned" means
 ** that the page is in active use and must not be deallocated.
+页被pin住就意味着该页不在LRU链表上。
+页被Pin住就意味着页是活跃的，正被使用，不能解除分配
 */
 #define PAGE_IS_PINNED(p)    ((p)->pLruNext==0)
 #define PAGE_IS_UNPINNED(p)  ((p)->pLruNext!=0)
@@ -138,22 +187,31 @@ struct PgHdr1 {
 ** pages when they are under memory pressure.  A PGroup is an instance of
 ** the following object.
 **
+每个PCache都属于PGroup.
+PGroup是一个或多个可以在内存压力下互相回收其他PCache的unpin页的PCache的集合。
 ** This page cache implementation works in one of two modes:
 **
 **   (1)  Every PCache is the sole member of its own PGroup.  There is
 **        one PGroup per PCache.
 **
 **   (2)  There is a single global PGroup that all PCaches are a member
-**        of.
+**        of.e
 **
+PCache可以在下列两种模式下工作
+    （1）每个PCache都有单独的PGroup
+    （2）所有的PCache有同一个PGroup
 ** Mode 1 uses more memory (since PCache instances are not able to rob
 ** unused pages from other PCaches) but it also operates without a mutex,
 ** and is therefore often faster.  Mode 2 requires a mutex in order to be
 ** threadsafe, but recycles pages more efficiently.
 **
+模式1使用更多的内存（因为不能使用其他PCache未使用的页），但是他不需要使用锁，因此更快。
+模式2需要一把锁来保证线程安全，但是回收页使得内存更有效率。
 ** For mode (1), PGroup.mutex is NULL.  For mode (2) there is only a single
 ** PGroup which is the pcache1.grp global variable and its mutex is
 ** SQLITE_MUTEX_STATIC_LRU.
+模式1，PGroup.mutex是NULL
+
 */
 struct PGroup {
   sqlite3_mutex *mutex;          /* MUTEX_STATIC_LRU or NULL */
@@ -169,8 +227,10 @@ struct PGroup {
 ** temporary or transient database) has a single page cache which
 ** is an instance of this object.
 **
+每次打开数据库文件都有一个PCache1。
 ** Pointers to structures of this type are cast and returned as 
 ** opaque sqlite3_pcache* handles.
+指向该结构体的指针，在外部用sqlite3_pcache*类型替代（注：因为外部不感知PCache1结构体，类似于外部使用void *）
 */
 struct PCache1 {
   /* Cache configuration parameters. Page size (szPage) and the purgeable
@@ -178,6 +238,9 @@ struct PCache1 {
   ** cache is created and are never changed thereafter. nMax may be 
   ** modified at any time by a call to the pcache1Cachesize() method.
   ** The PGroup mutex must be held when accessing nMax.
+  szPage、bPurgeable、pnPurgeable在PCache1被创建时指定，后续不会改变。
+  nMax 可能通过pcache1Cachesize()改变。
+  当改变nMax时，必须持有PGroup的锁
   */
   PGroup *pGroup;                     /* PGroup this cache belongs to */
   unsigned int *pnPurgeable;          /* Pointer to pGroup->nPurgeable */
@@ -205,7 +268,9 @@ struct PCache1 {
 /*
 ** Free slots in the allocator used to divide up the global page cache
 ** buffer provided using the SQLITE_CONFIG_PAGECACHE mechanism.
+如果使用SQLITE_CONFIG_PAGECACHE机制，Free slot 用来分割全局页缓存
 */
+
 struct PgFreeslot {
   PgFreeslot *pNext;  /* Next free slot */
 };
@@ -220,22 +285,25 @@ static SQLITE_WSD struct PCacheGlobal {
   ** szSlot, nSlot, pStart, pEnd, nReserve, and isInit values are all
   ** fixed at sqlite3_initialize() time and do not require mutex protection.
   ** The nFreeSlot and pFree values do require mutex protection.
+  szSlot, nSlot, pStart, pEnd, nReserve, isInit字段在sqlite3_initialize()初始化时指定，不需要锁保护
+  nFreeSlot，pFree的改变需要锁保护
   */
   int isInit;                    /* True if initialized */
-  int separateCache;             /* Use a new PGroup for each PCache */
-  int nInitPage;                 /* Initial bulk allocation size */   
-  int szSlot;                    /* Size of each free slot */
-  int nSlot;                     /* The number of pcache slots */
-  int nReserve;                  /* Try to keep nFreeSlot above this */
-  void *pStart, *pEnd;           /* Bounds of global page cache memory */
+  int separateCache;             // PCache是否有单独PGroup /* Use a new PGroup for each PCache */
+  int nInitPage;                 // bulk的大小 /* Initial bulk allocation size */   
+  int szSlot;                    // 缓存行大小 /* Size of each free slot */
+  int nSlot;                     // 缓存页个数 /* The number of pcache slots */
+  int nReserve;                  // 需要保留的空闲页个数 /* Try to keep nFreeSlot above this */
+  void *pStart, *pEnd;           // 全局页缓存的边界 /* Bounds of global page cache memory */
   /* Above requires no mutex.  Use mutex below for variable that follow. */
-  sqlite3_mutex *mutex;          /* Mutex for accessing the following: */
+  sqlite3_mutex *mutex;          // 保护下面的字段的锁 /* Mutex for accessing the following: */
   PgFreeslot *pFree;             /* Free page blocks */
   int nFreeSlot;                 /* Number of unused pcache slots */
   /* The following value requires a mutex to change.  We skip the mutex on
   ** reading because (1) most platforms read a 32-bit integer atomically and
   ** (2) even if an incorrect value is read, no great harm is done since this
   ** is really just an optimization. */
+  /*写需要锁保护，读不需要，因为读错没有什么损害*/
   int bUnderPressure;            /* True if low on PAGECACHE memory */
 } pcache1_g;
 
@@ -269,6 +337,8 @@ static SQLITE_WSD struct PCacheGlobal {
 ** verb to sqlite3_config(). Parameter pBuf points to an allocation large
 ** enough to contain 'n' buffers of 'sz' bytes each.
 **
+如果通过向 sqlite3_config() 传递 SQLITE_CONFIG_PAGECACHE 并且为页面缓存提供了静态缓冲区，则会在初始化过程中调用此函数。
+
 ** This routine is called from sqlite3_initialize() and so it is guaranteed
 ** to be serialized already.  There is no need for further mutexing.
 */
@@ -297,6 +367,10 @@ void sqlite3PCacheBufferSetup(void *pBuf, int sz, int n){
 /*
 ** Try to initialize the pCache->pFree and pCache->pBulk fields.  Return
 ** true if pCache->pFree ends up containing one or more free pages.
+*/
+/* 初始化一块内存，内存大小为nPage * (szPage + PgHdr1 + extra)
+   内存布局：Page | PageHdr1 | extra | Page | PageHdr1 | extra ...
+   初始化时用链表pNext串起来，
 */
 static int pcache1InitBulk(PCache1 *pCache){
   i64 szBulk;
@@ -341,6 +415,7 @@ static int pcache1InitBulk(PCache1 *pCache){
 ** Multiple threads can run this routine at the same time.  Global variables
 ** in pcache1 need to be protected via mutex.
 */
+// 从全局页空闲链表中申请一个页, 如果没有空闲页就malloc一个
 static void *pcache1Alloc(int nByte){
   void *p = 0;
   assert( sqlite3_mutex_notheld(pcache1.grp.mutex) );
@@ -379,6 +454,7 @@ static void *pcache1Alloc(int nByte){
 /*
 ** Free an allocated buffer obtained from pcache1Alloc().
 */
+// 归还页到全局页空闲链表
 static void pcache1Free(void *p){
   if( p==0 ) return;
   if( SQLITE_WITHIN(p, pcache1.pStart, pcache1.pEnd) ){
@@ -429,6 +505,9 @@ static int pcache1MemSize(void *p){
 /*
 ** Allocate a new page object initially associated with cache pCache.
 */
+/*
+  从动态Cache1中申请一个页，如果没有就从全局Cahce中申请
+*/
 static PgHdr1 *pcache1AllocPage(PCache1 *pCache, int benignMalloc){
   PgHdr1 *p = 0;
   void *pPg;
@@ -469,6 +548,7 @@ static PgHdr1 *pcache1AllocPage(PCache1 *pCache, int benignMalloc){
 /*
 ** Free a page object allocated by pcache1AllocPage().
 */
+/*归还页，如果是动态Cache的页就还到动态Cache, 否则还到全局Cache*/
 static void pcache1FreePage(PgHdr1 *p){
   PCache1 *pCache;
   assert( p!=0 );
@@ -534,6 +614,7 @@ static int pcache1UnderMemoryPressure(PCache1 *pCache){
 **
 ** The PCache mutex must be held when this function is called.
 */
+// 重新进行hash表的分配
 static void pcache1ResizeHash(PCache1 *p){
   PgHdr1 **apNew;
   unsigned int nNew;
@@ -575,6 +656,7 @@ static void pcache1ResizeHash(PCache1 *p){
 **
 ** The PGroup mutex must be held when this function is called.
 */
+// 将页从LRU链表中移除
 static PgHdr1 *pcache1PinPage(PgHdr1 *pPage){
   assert( pPage!=0 );
   assert( PAGE_IS_UNPINNED(pPage) );
@@ -600,6 +682,7 @@ static PgHdr1 *pcache1PinPage(PgHdr1 *pPage){
 **
 ** The PGroup mutex must be held when this function is called.
 */
+/*将页从动态Cache的哈希表中移除，如果需要归还，则归还到空闲页链表中*/
 static void pcache1RemoveFromHash(PgHdr1 *pPage, int freeFlag){
   unsigned int h;
   PCache1 *pCache = pPage->pCache;
@@ -618,6 +701,7 @@ static void pcache1RemoveFromHash(PgHdr1 *pPage, int freeFlag){
 ** If there are currently more than nMaxPage pages allocated, try
 ** to recycle pages to reduce the number allocated to nMaxPage.
 */
+/* 释放PGroup LRU链表中多余的页, 如果动态Cache中没有页，释放hash桶*/
 static void pcache1EnforceMaxPage(PCache1 *pCache){
   PGroup *pGroup = pCache->pGroup;
   PgHdr1 *p;
@@ -643,6 +727,7 @@ static void pcache1EnforceMaxPage(PCache1 *pCache){
 **
 ** The PCache mutex must be held when this function is called.
 */
+// 从动态Cache中移除iLimit 到 iMaxKey的页
 static void pcache1TruncateUnsafe(
   PCache1 *pCache,             /* The cache to truncate */
   unsigned int iLimit          /* Drop pages with this pgno or larger */
@@ -885,6 +970,9 @@ static SQLITE_NOINLINE PgHdr1 *pcache1FetchStage2(
   nPinned = pCache->nPage - pCache->nRecyclable;
   assert( pGroup->mxPinned == pGroup->nMaxPage + 10 - pGroup->nMinPage );
   assert( pCache->n90pct == pCache->nMax*9/10 );
+  /*
+    createFlag = 1时，PCache1 或者 PGroup的页缓存个数不足时，返回NULL
+  */
   if( createFlag==1 && (
         nPinned>=pGroup->mxPinned
      || nPinned>=pCache->n90pct
@@ -897,6 +985,9 @@ static SQLITE_NOINLINE PgHdr1 *pcache1FetchStage2(
   assert( pCache->nHash>0 && pCache->apHash );
 
   /* Step 4. Try to recycle a page. */
+  /*
+    如果LRU链表不为空，且 PCache缓存页都被使用过了或者PGroup预留页不足时，回收一个页
+  */
   if( pCache->bPurgeable
    && !pGroup->lru.pLruPrev->isAnchor
    && ((pCache->nPage+1>=pCache->nMax) || pcache1UnderMemoryPressure(pCache))
@@ -950,11 +1041,14 @@ static SQLITE_NOINLINE PgHdr1 *pcache1FetchStage2(
 ** page.  1 means allocate a new page if space is easily available.  2 
 ** means to try really hard to allocate a new page.
 **
+实现xFetch接口，使用createFlag参数来判断是否要申请一个新页。0意味着不申请新页，1 如果内存充足就申请新页，
+2 即使内存不充足也尝试申请一个新页
 ** For a non-purgeable cache (a cache used as the storage for an in-memory
 ** database) there is really no difference between createFlag 1 and 2.  So
 ** the calling function (pcache.c) will never have a createFlag of 1 on
 ** a non-purgeable cache.
 **
+对于一个没有回收功能的PCache1，createFlag = 1 和 createFlag = 2 没有区别
 ** There are three different approaches to obtaining space for a page,
 ** depending on the value of parameter createFlag (which may be 0, 1 or 2).
 **
@@ -970,11 +1064,17 @@ static SQLITE_NOINLINE PgHdr1 *pcache1FetchStage2(
 **
 **       (a) the number of pages pinned by the cache is greater than
 **           PCache1.nMax, or
-**
+**        PCache1的pin页数 > PCache1.nMax
 **       (b) the number of pages pinned by the cache is greater than
 **           the sum of nMax for all purgeable caches, less the sum of 
 **           nMin for all other purgeable caches, or
-**
+         PCache1的PIN页数 > PGroup.nMax  - (PGroup.nMin - PCache1.nMin)
+ nPinned>=pGroup->mxPinned
+     || nPinned>=pCache->n90pct
+     || (pcache1UnderMemoryPressure(pCache) && pCache->nRecyclable<nPinned)
+
+          
+**       
 **   4. If none of the first three conditions apply and the cache is marked
 **      as purgeable, and if one of the following is true:
 **
@@ -1110,6 +1210,7 @@ static void pcache1Unpin(
 /*
 ** Implementation of the sqlite3_pcache.xRekey method. 
 */
+/* 需要Page的哈希key */
 static void pcache1Rekey(
   sqlite3_pcache *p,
   sqlite3_pcache_page *pPg,
